@@ -1,0 +1,61 @@
+#!/bin/sh
+REF=
+ANN=
+mkdir {rawdata,fastqc,trim,align,variants,annovar}
+for i in `cat num.txt`
+do
+#fastqc
+echo "$i" start at $(data)
+fastqc -o ./fastqc/ ./rawdata/"$i"_1.fq.gz ./rawdata/"$i"_2.fq.gz
+trim_galore --cores 2 --quality 20 --phred33 --stringency 3 --length 20 -e 0.1 --paired ./rawdata/"$i"_1.fq.gz ./rawdata/"$i"_2.fq.gz --gzip -o ./trim/
+fastqc -o ./fastqc ./trim/"$i"_1_val_1.fq.gz ./trim/"$i"_2_val_2.fq.gz
+echo "$i" end at $(data)
+
+#alignment
+echo "$i" start at $(data)
+SM="$i"
+bwa mem -M -R '@RG\tID:$SM\tLB:$SM\tPL:ILLUMINA\tPM:HISEQ\tSM:$SM' $REF ./trim/"$i"_1_val_1.fq.gz ./trim/"$i"_2_val_2.fq.gz > ./align/"$i".sam
+samtools view -bS ./align/"$i".sam|samtools sort -o ./align/"$i".sorted.bam
+rm ./align/"$i".sam
+#mark duplication
+java -jar picard.jar MarkDuplicates INPUT=./align/"$i".sorted.bam OUTPUT=./align/"$i".dup.bam METRICS_FILE=./align/metrics"$i".txt
+java -jar picard.jar BuildBamIndex INPUT=./align/"$i".dup.bam
+echo "$i" end at $(data)
+
+#BQSR
+echo "$i" start at $(data)
+java -jar GenomeAnalysisTK.jar -T RealignerTargetCreator -R $REF -I ./align/"$i".dup.bam -o ./align/realign"$i"_targets.list
+java -jar GenomeAnalysisTK.jar -T IndelRealigner -R $REF -I ./align/"$i".dup.bam -targetIntervals ./align/realign"$i"_targets.list -o ./align/"$i".realign.bam
+java -jar GenomeAnalysisTK.jar -T BaseRecalibrator -R $REF -I ./align/"$i".realign.bam -knownSites 1000G_phase1.snps.high_confidence.b37_sorted.vcf -knownSites \
+Mills_and_1000G_gold_standard.indels.b37_sorted.vcf -o ./align/"$i"_recal.table
+java -jar GenomeAnalysisTK.jar  -T BaseRecalibrator -R $REF -I ./align/"$i".realign.bam -knownSites 1000G_phase1.snps.high_confidence.b37_sorted.vcf -knownSites \
+Mills_and_1000G_gold_standard.indels.b37_sorted.vcf -BQSR ./align/"$i"_recal.table -o ./align/"$i"_post_recal_data.table
+java -jar GenomeAnalysisTK.jar -T PrintReads -R $REF -I ./align/"$i".realign.bam -BQSR ./align/"$i"_recal.table -o ./align/"$i".recal.bam
+echo "$i" end at $(data)
+
+#call variants
+echo "$i" start at $(data)
+java -jar GenomeAnalysisTK.jar -T HaplotypeCaller -R $REF -I ./align/"$i".recal.bam -o ./variant/"$i".raw.vcf
+java -jar GenomeAnalysisTK.jar -T SelectVariants -R $REF -V  ./variant/"$i".raw.vcf -selectType SNP -o  ./variant/"$i".rawSNP.vcf
+java -jar GenomeAnalysisTK.jar -T SelectVariants -R $REF -V  ./variant/"$i".raw.vcf  -selectType INDEL -o  ./variant/"$i".rawIndel.vcf
+java -jar GenomeAnalysisTK.jar -T VariantFiltration -R $REF -V  ./variant/"$i".rawSNP.vcf --filterExpression \
+'QD < 2.0 || FS > 60.0 || MQ < 40.0 || MQRankSum < -12.5 || ReadPosRankSum < -8.0 || SOR > 4.0' --filterName "basic_snp_filter" -o  ./variant/"$i".filteredSNP.vcf
+java -jar GenomeAnalysisTK.jar -T VariantFiltration -R $REF -V  ./variant/"$i".rawIndel.vcf --filterExpression \
+'QD < 2.0 || FS > 200.0 || ReadPosRankSum < -20.0 || SOR > 10.0' --filterName "basic_indel_filter" -o  ./variant/"$i".filteredIndel.vcf
+echo "$i" end at $(data)
+
+#annotation
+echo "$i" start at $(data)
+table_annovar.pl ./variant/"$i".filteredSNP.vcf $ANN -buildver hg19 -out ./annovar/SNP"$i"_myanno -remove -protocol \
+refGene,cytoBand,snp142,esp6500siv2_all,exac03,gnomad_exome,gnomad_genome,1000g2015aug_all,1000g2015aug_afr,1000g2015aug_amr,1000g2015aug_eas,1000g2015aug_eur,1000g2015aug_sas,cosmic70,clinvar_20190305,dbnsfp35a, -operation g,r,f,f,f,f,f,f,f,f,f,f,f,f,f,f -nastring . -vcfinput -otherinfo -thread 12
+table_annovar.pl ./variant/"$i".filteredIndel.vcf $ANN -buildver hg19 -out ./annovar/INDEL"$i"_myanno -remove -protocol \
+refGene,cytoBand,snp142,esp6500siv2_all,exac03,gnomad_exome,gnomad_genome,1000g2015aug_all,1000g2015aug_afr,1000g2015aug_amr,1000g2015aug_eas,1000g2015aug_eur,1000g2015aug_sas,cosmic70,clinvar_20190305,dbnsfp35a, -operation g,r,f,f,f,f,f,f,f,f,f,f,f,f,f,f -nastring . -vcfinput -otherinfo -thread 12
+echo "$i" end at $(data)
+
+#filter on SNP file
+echo "$i" start at $(data)
+cat SNP"$i"_myanno.hg19_multianno.vcf|java -jar SnpSift.jar filter "FILTER = 'PASS'" > SNP"$i".pass.vcf
+cat SNP"$i".pass.vcf|java -jar SnpSift.jar filter "((Func.refGene='UTR3')|(Func.refGene='UTR5')|(Func.refGene='exonic'))" > SNP"$i".func.refgene.vcf
+cat SNP"$i".func.refgene.vcf|java -jar SnpSift.jar filter "((ExonicFunc.refGene='nonsynonymous_SNV')|(ExonicFunc.refGene='stopgain')|(ExonicFunc.refGene='stoploss')|(ExonicFunc.refGene='.'))" > SNP"$i".exonicfunc.refgene.vcf
+echo "$i" end at $(data)
+done
