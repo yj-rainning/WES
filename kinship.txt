@@ -1,0 +1,10 @@
+#!/bin/sh
+
+#combine file
+java -jar GenomeAnalysisTK.jar -T CombineVariants -R ./GRCh37.75/GRCh37.fa -V SNP1.vcf -V SNP2.vcf -V SNP3.vcf -o combinedSNP.vcf -genotypeMergeOptions UNIQUIFY
+
+#fix missing calls to distinguish from no-call
+java -jar fixvcfmissinggenotypes.jar -B bam.list < combinedSNP.vcf > combinedSNP.fix.vcf
+
+#calculate kinship
+vcftools --relatedness2 --vcf combinedSNP.fix.vcf --out family
